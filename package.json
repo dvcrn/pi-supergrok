@@ -1,0 +1,14 @@
+{
+  "name": "pi-supergrok",
+  "version": "0.1.0",
+  "description": "Pi extension that adds SuperGrok/xAI OAuth for Grok models.",
+  "type": "module",
+  "keywords": ["pi-package", "pi", "extension", "supergrok", "xai", "grok", "oauth"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
