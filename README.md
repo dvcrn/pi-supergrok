@@ -1,6 +1,20 @@
 # pi-supergrok
 
-Pi extension/package that adds SuperGrok/xAI OAuth for Grok models.
+Pi extension that adds SuperGrok/xAI OAuth for Grok models.
+
+Requires pi `0.74.0` or newer.
+
+## Install
+
+```bash
+pi install npm:pi-supergrok
+```
+
+Or try without installing:
+
+```bash
+pi -e npm:pi-supergrok
+```
 
 ## Usage
 
@@ -15,3 +29,13 @@ Then select a model such as:
 ```text
 /model supergrok/grok-4.3
 ```
+
+## Uninstall
+
+```bash
+pi remove npm:pi-supergrok
+```
+
+## License
+
+MIT
