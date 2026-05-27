@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
 	createAssistantMessageEventStream,
 	streamSimpleOpenAICompletions,
@@ -52,66 +55,15 @@ interface OAuthListener {
 	close(): Promise<void>;
 }
 
-const grokCost = { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 };
-const grokBuildCost = { input: 1, output: 2, cacheRead: 0.2, cacheWrite: 0 };
-const grokCodeFastCost = { input: 0.2, output: 1.5, cacheRead: 0.02, cacheWrite: 0 };
-
-const SUPERGROK_MODELS = [
-	{
-		id: "grok-4.3",
-		name: "Grok 4.3 (SuperGrok)",
-		reasoning: true,
-		input: ["text", "image"] as const,
-		cost: grokCost,
-		contextWindow: 1_000_000,
-		maxTokens: 30_000,
-	},
-	{
-		id: "grok-4.20-0309-reasoning",
-		name: "Grok 4.20 Reasoning (SuperGrok)",
-		reasoning: true,
-		input: ["text", "image"] as const,
-		cost: grokCost,
-		contextWindow: 2_000_000,
-		maxTokens: 30_000,
-	},
-	{
-		id: "grok-4.20-0309-non-reasoning",
-		name: "Grok 4.20 Non-Reasoning (SuperGrok)",
-		reasoning: false,
-		input: ["text", "image"] as const,
-		cost: grokCost,
-		contextWindow: 2_000_000,
-		maxTokens: 30_000,
-	},
-	{
-		id: "grok-4.20-multi-agent-0309",
-		name: "Grok 4.20 Multi-Agent (SuperGrok)",
-		reasoning: true,
-		input: ["text", "image"] as const,
-		cost: grokCost,
-		contextWindow: 2_000_000,
-		maxTokens: 30_000,
-	},
-	{
-		id: "grok-build-0.1",
-		name: "Grok Build 0.1 (SuperGrok)",
-		reasoning: true,
-		input: ["text", "image"] as const,
-		cost: grokBuildCost,
-		contextWindow: 256_000,
-		maxTokens: 256_000,
-	},
-	{
-		id: "grok-code-fast-1",
-		name: "Grok Code Fast 1 (SuperGrok)",
-		reasoning: false,
-		input: ["text"] as const,
-		cost: grokCodeFastCost,
-		contextWindow: 32_768,
-		maxTokens: 8192,
-	},
-];
+type ProviderModelConfig = {
+	id: string;
+	name: string;
+	reasoning: boolean;
+	input: ("text" | "image")[];
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	contextWindow: number;
+	maxTokens: number;
+};
 
 function generatePkce(): { verifier: string; challenge: string } {
 	const verifier = crypto.randomBytes(48).toString("base64url");
@@ -475,6 +427,161 @@ function handleRequest(req: IncomingMessage, res: ServerResponse, onCallback: (u
 	);
 }
 
+type StoredAuthFile = Record<string, ({ type?: string } & Partial<OAuthCredentials>) | undefined>;
+
+type XaiModelPayload = {
+	data?: Array<Record<string, unknown>>;
+};
+
+function authJsonPath(): string {
+	return join(homedir(), ".pi", "agent", "auth.json");
+}
+
+function readStoredAuth(): StoredAuthFile {
+	const path = authJsonPath();
+	if (!existsSync(path)) return {};
+	return JSON.parse(readFileSync(path, "utf8")) as StoredAuthFile;
+}
+
+function writeStoredAuth(auth: StoredAuthFile): void {
+	writeFileSync(authJsonPath(), `${JSON.stringify(auth, null, 2)}\n`, "utf8");
+}
+
+async function getStoredOAuthCredentials(): Promise<OAuthCredentials | undefined> {
+	const auth = readStoredAuth();
+	for (const provider of ["supergrok", "xai"] as const) {
+		const credentials = auth[provider];
+		if (credentials?.type !== "oauth" || !credentials.access || !credentials.refresh || !credentials.expires) {
+			continue;
+		}
+
+		const current: OAuthCredentials = {
+			access: credentials.access,
+			refresh: credentials.refresh,
+			expires: credentials.expires,
+		};
+
+		if (Date.now() < current.expires) return current;
+
+		const refreshed = await refreshXaiTokens(current);
+		auth[provider] = { type: "oauth", ...refreshed };
+		writeStoredAuth(auth);
+		return refreshed;
+	}
+
+	return undefined;
+}
+
+async function fetchSuperGrokModels(): Promise<ProviderModelConfig[]> {
+	const credentials = await getStoredOAuthCredentials().catch(() => undefined);
+	if (!credentials?.access) return [];
+
+	const response = await fetch(`${XAI_API_BASE_URL}/models`, {
+		headers: {
+			Accept: "application/json",
+			Authorization: `Bearer ${credentials.access}`,
+			"x-grok-source": "pi-supergrok",
+		},
+	});
+
+	if (!response.ok) {
+		throw new Error(`Failed to fetch xAI models: HTTP ${response.status} ${await response.text()}`);
+	}
+
+	const payload = (await response.json()) as XaiModelPayload;
+	return (payload.data ?? [])
+		.map(toProviderModelConfig)
+		.filter((model): model is ProviderModelConfig => model !== undefined);
+}
+
+function toProviderModelConfig(raw: Record<string, unknown>): ProviderModelConfig | undefined {
+	const id = String(raw.id ?? "").trim();
+	if (!id) return undefined;
+	// The provider uses Chat Completions; skip non-chat generation models returned by /v1/models.
+	// Also skip multi-agent, which is not usable as a normal single chat-completions model in pi.
+	if (/image|video|imagine|multi-agent/i.test(id)) return undefined;
+
+	const contextWindow = numberFrom(raw, [
+		"context_window",
+		"contextWindow",
+		"max_context_window",
+		"maxContextWindow",
+		"context_length",
+		"contextLength",
+	]) ?? 131_072;
+	const maxTokens = numberFrom(raw, ["max_output_tokens", "maxOutputTokens", "max_tokens", "maxTokens"]) ?? 8192;
+	const supportsImages = booleanFrom(raw, ["supports_images", "supportsImages", "vision", "image"])
+		?? arrayIncludes(raw.input, "image")
+		?? arrayIncludes(raw.capabilities, "image")
+		?? true;
+	const reasoning = booleanFrom(raw, ["reasoning", "supports_reasoning", "supportsReasoning"])
+		?? !/non[-_ ]?reasoning|code[-_ ]?fast|^grok-3(?:-|$)/i.test(id);
+
+	return {
+		id,
+		name: String(raw.name ?? displayName(id)).trim(),
+		reasoning,
+		input: supportsImages ? ["text", "image"] : ["text"],
+		cost: costFrom(raw),
+		contextWindow,
+		maxTokens,
+	};
+}
+
+function numberFrom(raw: Record<string, unknown>, keys: string[]): number | undefined {
+	for (const key of keys) {
+		const value = raw[key];
+		if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+		if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+	}
+	return undefined;
+}
+
+function booleanFrom(raw: Record<string, unknown>, keys: string[]): boolean | undefined {
+	for (const key of keys) {
+		const value = raw[key];
+		if (typeof value === "boolean") return value;
+	}
+	return undefined;
+}
+
+function arrayIncludes(value: unknown, item: string): boolean | undefined {
+	if (!Array.isArray(value)) return undefined;
+	return value.some((entry) => String(entry).toLowerCase() === item);
+}
+
+function costFrom(raw: Record<string, unknown>): ProviderModelConfig["cost"] {
+	const pricing = typeof raw.pricing === "object" && raw.pricing ? (raw.pricing as Record<string, unknown>) : raw;
+	return {
+		input:
+			numberFrom(pricing, ["input", "prompt", "input_cost_per_million", "prompt_cost_per_million"]) ??
+			xaiPriceFrom(pricing, "prompt_text_token_price") ??
+			0,
+		output:
+			numberFrom(pricing, ["output", "completion", "output_cost_per_million", "completion_cost_per_million"]) ??
+			xaiPriceFrom(pricing, "completion_text_token_price") ??
+			0,
+		cacheRead:
+			numberFrom(pricing, ["cacheRead", "cache_read", "cache_read_cost_per_million"]) ??
+			xaiPriceFrom(pricing, "cached_prompt_text_token_price") ??
+			0,
+		cacheWrite: numberFrom(pricing, ["cacheWrite", "cache_write", "cache_write_cost_per_million"]) ?? 0,
+	};
+}
+
+function xaiPriceFrom(raw: Record<string, unknown>, key: string): number | undefined {
+	const value = numberFrom(raw, [key]);
+	return value === undefined ? undefined : value / 10_000;
+}
+
+function displayName(id: string): string {
+	return `${id
+		.split(/[-_]/g)
+		.filter(Boolean)
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+		.join(" ")} (SuperGrok)`;
+}
+
 function streamSuperGrokWithOAuth(
 	model: Model<Api>,
 	context: Context,
@@ -533,8 +640,11 @@ const oauth = {
 	getApiKey: (credentials: OAuthCredentials) => credentials.access,
 };
 
-export default function (pi: ExtensionAPI) {
+export default async function (pi: ExtensionAPI) {
+	const models = await fetchSuperGrokModels();
+
 	// Expose SuperGrok separately from pi's built-in xAI API-key provider.
+	// Model IDs come from the authenticated upstream /v1/models endpoint.
 	pi.registerProvider("supergrok", {
 		name: "SuperGrok (xAI OAuth)",
 		baseUrl: XAI_API_BASE_URL,
@@ -542,6 +652,6 @@ export default function (pi: ExtensionAPI) {
 		headers: { "x-grok-source": "pi-supergrok" },
 		oauth,
 		streamSimple: streamSuperGrokWithOAuth,
-		models: SUPERGROK_MODELS.map((model) => ({ ...model, input: [...model.input] })),
+		...(models.length > 0 ? { models } : {}),
 	});
 }

@@ -2,13 +2,37 @@
   "name": "pi-supergrok",
   "version": "0.1.0",
   "description": "Pi extension that adds SuperGrok/xAI OAuth for Grok models.",
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "supergrok",
+    "xai",
+    "grok",
+    "oauth"
+  ],
   "type": "module",
-  "keywords": ["pi-package", "pi", "extension", "supergrok", "xai", "grok", "oauth"],
+  "files": [
+    "extensions/",
+    "README.md"
+  ],
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./extensions/index.ts"
+    ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
-  }
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dvcrn/pi-supergrok.git"
+  },
+  "author": "David",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/dvcrn/pi-supergrok/issues"
+  },
+  "homepage": "https://github.com/dvcrn/pi-supergrok#readme"
 }
