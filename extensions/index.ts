@@ -65,6 +65,26 @@ type ProviderModelConfig = {
 	maxTokens: number;
 };
 
+/**
+ * Models that should always be available for the supergrok provider,
+ * even if they are not (yet) returned by the live /v1/models endpoint
+ * or when the user has not yet run /login.
+ *
+ * These are merged with dynamically fetched models (live ones are appended
+ * if they don't conflict on id).
+ */
+const STATIC_SUPERGROK_MODELS: ProviderModelConfig[] = [
+	{
+		id: "grok-composer-2.5-fast",
+		name: "Grok Composer 2.5 Fast (SuperGrok)",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 131_072,
+		maxTokens: 8192,
+	},
+];
+
 function generatePkce(): { verifier: string; challenge: string } {
 	const verifier = crypto.randomBytes(48).toString("base64url");
 	const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
@@ -641,10 +661,20 @@ const oauth = {
 };
 
 export default async function (pi: ExtensionAPI) {
-	const models = await fetchSuperGrokModels();
+	const liveModels = await fetchSuperGrokModels();
+
+	// Always include static/special models (e.g. composer variants that may not
+	// appear in the public /v1/models response) and append any additional
+	// models returned by the authenticated upstream endpoint.
+	// Live models with the same id as a static one are ignored (static wins).
+	const models: ProviderModelConfig[] = [...STATIC_SUPERGROK_MODELS];
+	for (const m of liveModels) {
+		if (!models.some((existing) => existing.id === m.id)) {
+			models.push(m);
+		}
+	}
 
 	// Expose SuperGrok separately from pi's built-in xAI API-key provider.
-	// Model IDs come from the authenticated upstream /v1/models endpoint.
 	pi.registerProvider("supergrok", {
 		name: "SuperGrok (xAI OAuth)",
 		baseUrl: XAI_API_BASE_URL,
@@ -652,6 +682,6 @@ export default async function (pi: ExtensionAPI) {
 		headers: { "x-grok-source": "pi-supergrok" },
 		oauth,
 		streamSimple: streamSuperGrokWithOAuth,
-		...(models.length > 0 ? { models } : {}),
+		models,
 	});
 }
