@@ -4,15 +4,15 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-	createAssistantMessageEventStream,
-	streamSimpleOpenAICompletions,
 	type Api,
 	type AssistantMessageEventStream,
 	type Context,
+	createAssistantMessageEventStream,
 	type Model,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	type SimpleStreamOptions,
+	streamSimpleOpenAICompletions,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -23,7 +23,8 @@ const XAI_OAUTH_DISCOVERY_URL = `${XAI_OAUTH_ISSUER}/.well-known/openid-configur
 
 // Public desktop OAuth client ID used by xAI/Grok CLI style clients. This is not a secret.
 const XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
-const XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access";
+const XAI_OAUTH_SCOPE =
+	"openid profile email offline_access grok-cli:access api:access";
 
 const REDIRECT_HOST = "127.0.0.1";
 const REDIRECT_PORT = 56121;
@@ -60,7 +61,12 @@ type ProviderModelConfig = {
 	name: string;
 	reasoning: boolean;
 	input: ("text" | "image")[];
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	cost: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+	};
 	contextWindow: number;
 	maxTokens: number;
 };
@@ -87,39 +93,55 @@ const STATIC_SUPERGROK_MODELS: ProviderModelConfig[] = [
 
 function generatePkce(): { verifier: string; challenge: string } {
 	const verifier = crypto.randomBytes(48).toString("base64url");
-	const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+	const challenge = crypto
+		.createHash("sha256")
+		.update(verifier)
+		.digest("base64url");
 	return { verifier, challenge };
 }
 
 function validateXaiOAuthEndpoint(url: string, field = "endpoint"): string {
 	const parsed = new URL(url);
 	if (parsed.protocol !== "https:") {
-		throw new Error(`xAI OAuth discovery returned a non-HTTPS ${field}: ${url}`);
+		throw new Error(
+			`xAI OAuth discovery returned a non-HTTPS ${field}: ${url}`,
+		);
 	}
 
 	const host = parsed.hostname.toLowerCase();
 	if (host !== "x.ai" && !host.endsWith(".x.ai")) {
-		throw new Error(`xAI OAuth discovery ${field} host ${host} is not on xAI's origin.`);
+		throw new Error(
+			`xAI OAuth discovery ${field} host ${host} is not on xAI's origin.`,
+		);
 	}
 
 	return url;
 }
 
 async function discoverXaiOAuth(): Promise<XaiDiscovery> {
-	const response = await fetch(XAI_OAUTH_DISCOVERY_URL, { headers: { Accept: "application/json" } });
+	const response = await fetch(XAI_OAUTH_DISCOVERY_URL, {
+		headers: { Accept: "application/json" },
+	});
 	if (!response.ok) {
 		throw new Error(`xAI OIDC discovery failed with HTTP ${response.status}.`);
 	}
 
 	const payload = (await response.json()) as Record<string, unknown>;
-	const authorizationEndpoint = String(payload.authorization_endpoint ?? "").trim();
+	const authorizationEndpoint = String(
+		payload.authorization_endpoint ?? "",
+	).trim();
 	const tokenEndpoint = String(payload.token_endpoint ?? "").trim();
 	if (!authorizationEndpoint || !tokenEndpoint) {
-		throw new Error("xAI OIDC discovery did not include authorization and token endpoints.");
+		throw new Error(
+			"xAI OIDC discovery did not include authorization and token endpoints.",
+		);
 	}
 
 	return {
-		authorizationEndpoint: validateXaiOAuthEndpoint(authorizationEndpoint, "authorization_endpoint"),
+		authorizationEndpoint: validateXaiOAuthEndpoint(
+			authorizationEndpoint,
+			"authorization_endpoint",
+		),
 		tokenEndpoint: validateXaiOAuthEndpoint(tokenEndpoint, "token_endpoint"),
 	};
 }
@@ -131,7 +153,10 @@ function buildXaiAuthorizeUrl(input: {
 	state: string;
 	nonce: string;
 }): string {
-	validateXaiOAuthEndpoint(input.authorizationEndpoint, "authorization_endpoint");
+	validateXaiOAuthEndpoint(
+		input.authorizationEndpoint,
+		"authorization_endpoint",
+	);
 
 	// The Hermes/SuperGrok flow currently expects /oauth2/authorize and referrer=hermes-agent.
 	const url = new URL(XAI_OAUTH_AUTHORIZE_URL);
@@ -155,11 +180,17 @@ async function exchangeXaiCodeForTokens(input: {
 	codeVerifier: string;
 	codeChallenge: string;
 }): Promise<XaiTokenPayload> {
-	const tokenEndpoint = validateXaiOAuthEndpoint(input.tokenEndpoint, "token_endpoint");
+	const tokenEndpoint = validateXaiOAuthEndpoint(
+		input.tokenEndpoint,
+		"token_endpoint",
+	);
 	const startedAt = Date.now();
 	const response = await fetch(tokenEndpoint, {
 		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+		headers: {
+			"Content-Type": "application/x-www-form-urlencoded",
+			Accept: "application/json",
+		},
 		body: new URLSearchParams({
 			grant_type: "authorization_code",
 			code: input.code,
@@ -174,23 +205,32 @@ async function exchangeXaiCodeForTokens(input: {
 	return parseTokenResponse(response, startedAt, "xAI token exchange failed");
 }
 
-async function refreshXaiTokens(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+async function refreshXaiTokens(
+	credentials: OAuthCredentials,
+): Promise<OAuthCredentials> {
 	const parts = parseXaiRefresh(credentials.refresh);
 	if (!parts.refreshToken) {
 		throw new Error("xAI OAuth refresh token is missing. Run /login again.");
 	}
 
-	const tokenEndpoint = parts.tokenEndpoint ?? (await discoverXaiOAuth()).tokenEndpoint;
+	const tokenEndpoint =
+		parts.tokenEndpoint ?? (await discoverXaiOAuth()).tokenEndpoint;
 	const startedAt = Date.now();
-	const response = await fetch(validateXaiOAuthEndpoint(tokenEndpoint, "token_endpoint"), {
-		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-		body: new URLSearchParams({
-			grant_type: "refresh_token",
-			client_id: XAI_OAUTH_CLIENT_ID,
-			refresh_token: parts.refreshToken,
-		}),
-	});
+	const response = await fetch(
+		validateXaiOAuthEndpoint(tokenEndpoint, "token_endpoint"),
+		{
+			method: "POST",
+			headers: {
+				"Content-Type": "application/x-www-form-urlencoded",
+				Accept: "application/json",
+			},
+			body: new URLSearchParams({
+				grant_type: "refresh_token",
+				client_id: XAI_OAUTH_CLIENT_ID,
+				refresh_token: parts.refreshToken,
+			}),
+		},
+	);
 
 	const refreshed = await parseTokenResponse(
 		response,
@@ -218,7 +258,9 @@ async function parseTokenResponse(
 ): Promise<XaiTokenPayload> {
 	const text = await response.text();
 	if (!response.ok) {
-		throw new Error(`${errorPrefix} (HTTP ${response.status}).${text ? ` Response: ${text}` : ""}`);
+		throw new Error(
+			`${errorPrefix} (HTTP ${response.status}).${text ? ` Response: ${text}` : ""}`,
+		);
 	}
 
 	let payload: Record<string, unknown>;
@@ -229,9 +271,13 @@ async function parseTokenResponse(
 	}
 
 	const accessToken = String(payload.access_token ?? "").trim();
-	const refreshToken = String(payload.refresh_token ?? fallbackRefreshToken).trim();
-	if (!accessToken) throw new Error(`${errorPrefix}: response did not include access_token.`);
-	if (!refreshToken) throw new Error(`${errorPrefix}: response did not include refresh_token.`);
+	const refreshToken = String(
+		payload.refresh_token ?? fallbackRefreshToken,
+	).trim();
+	if (!accessToken)
+		throw new Error(`${errorPrefix}: response did not include access_token.`);
+	if (!refreshToken)
+		throw new Error(`${errorPrefix}: response did not include refresh_token.`);
 
 	return {
 		accessToken,
@@ -240,8 +286,16 @@ async function parseTokenResponse(
 	};
 }
 
-function calculateTokenExpiry(requestTimeMs: number, expiresInSeconds: unknown, accessToken?: string): number {
-	if (typeof expiresInSeconds === "number" && Number.isFinite(expiresInSeconds) && expiresInSeconds > 0) {
+function calculateTokenExpiry(
+	requestTimeMs: number,
+	expiresInSeconds: unknown,
+	accessToken?: string,
+): number {
+	if (
+		typeof expiresInSeconds === "number" &&
+		Number.isFinite(expiresInSeconds) &&
+		expiresInSeconds > 0
+	) {
 		return requestTimeMs + expiresInSeconds * 1000;
 	}
 
@@ -250,13 +304,17 @@ function calculateTokenExpiry(requestTimeMs: number, expiresInSeconds: unknown, 
 }
 
 function getJwtExpiry(token?: string): number | undefined {
-	if (!token || !token.includes(".")) return undefined;
+	if (!token?.includes(".")) return undefined;
 	try {
 		const payload = token.split(".")[1];
 		if (!payload) return undefined;
-		const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>;
+		const parsed = JSON.parse(
+			Buffer.from(payload, "base64url").toString("utf8"),
+		) as Record<string, unknown>;
 		const exp = parsed.exp;
-		return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : undefined;
+		return typeof exp === "number" && Number.isFinite(exp)
+			? exp * 1000
+			: undefined;
 	} catch {
 		return undefined;
 	}
@@ -272,28 +330,38 @@ function parseXaiRefresh(refresh: string): XaiRefreshParts {
 	if (!value.startsWith(REFRESH_PREFIX)) return { refreshToken: value };
 
 	try {
-		const parsed = JSON.parse(Buffer.from(value.slice(REFRESH_PREFIX.length), "base64url").toString("utf8")) as Record<
-			string,
-			unknown
-		>;
+		const parsed = JSON.parse(
+			Buffer.from(value.slice(REFRESH_PREFIX.length), "base64url").toString(
+				"utf8",
+			),
+		) as Record<string, unknown>;
 		return {
-			refreshToken: typeof parsed.refreshToken === "string" ? parsed.refreshToken : "",
-			tokenEndpoint: typeof parsed.tokenEndpoint === "string" ? parsed.tokenEndpoint : undefined,
-			redirectUri: typeof parsed.redirectUri === "string" ? parsed.redirectUri : undefined,
+			refreshToken:
+				typeof parsed.refreshToken === "string" ? parsed.refreshToken : "",
+			tokenEndpoint:
+				typeof parsed.tokenEndpoint === "string"
+					? parsed.tokenEndpoint
+					: undefined,
+			redirectUri:
+				typeof parsed.redirectUri === "string" ? parsed.redirectUri : undefined,
 		};
 	} catch {
 		return { refreshToken: "" };
 	}
 }
 
-function parseOAuthCallbackInput(input: string, expectedState: string): { code: string } | { error: string } {
+function parseOAuthCallbackInput(
+	input: string,
+	expectedState: string,
+): { code: string } | { error: string } {
 	const raw = input.trim();
 	if (!raw) return { error: "Missing authorization code." };
 
 	try {
 		const url = new URL(raw);
 		const oauthError = url.searchParams.get("error");
-		if (oauthError) return { error: url.searchParams.get("error_description") ?? oauthError };
+		if (oauthError)
+			return { error: url.searchParams.get("error_description") ?? oauthError };
 
 		const code = url.searchParams.get("code") ?? "";
 		const state = url.searchParams.get("state") ?? "";
@@ -305,7 +373,9 @@ function parseOAuthCallbackInput(input: string, expectedState: string): { code: 
 	}
 }
 
-async function loginXai(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
+async function loginXai(
+	callbacks: OAuthLoginCallbacks,
+): Promise<OAuthCredentials> {
 	const discovery = await discoverXaiOAuth();
 	const listener = await startXaiOAuthListener();
 	const pkce = generatePkce();
@@ -348,13 +418,15 @@ async function loginXai(callbacks: OAuthLoginCallbacks): Promise<OAuthCredential
 	}
 }
 
-async function startXaiOAuthListener(preferredPort = REDIRECT_PORT): Promise<OAuthListener> {
+async function startXaiOAuthListener(
+	preferredPort = REDIRECT_PORT,
+): Promise<OAuthListener> {
 	let resolveCallback: ((url: URL) => void) | undefined;
-	let rejectCallback: ((error: Error) => void) | undefined;
+	let _rejectCallback: ((error: Error) => void) | undefined;
 
 	const callbackPromise = new Promise<URL>((resolve, reject) => {
 		resolveCallback = resolve;
-		rejectCallback = reject;
+		_rejectCallback = reject;
 	});
 
 	const server = http.createServer((req, res) => {
@@ -368,20 +440,27 @@ async function startXaiOAuthListener(preferredPort = REDIRECT_PORT): Promise<OAu
 		redirectUri,
 		waitForCallback(timeoutMs: number) {
 			const timeout = new Promise<never>((_, reject) => {
-				setTimeout(() => reject(new Error("Timed out waiting for the xAI OAuth callback.")), timeoutMs);
+				setTimeout(
+					() =>
+						reject(new Error("Timed out waiting for the xAI OAuth callback.")),
+					timeoutMs,
+				);
 			});
 			return Promise.race([callbackPromise, timeout]);
 		},
 		close() {
 			return new Promise<void>((resolve) => {
-				rejectCallback = undefined;
+				_rejectCallback = undefined;
 				server.close(() => resolve());
 			});
 		},
 	};
 }
 
-function listenWithFallback(server: http.Server, preferredPort: number): Promise<number> {
+function listenWithFallback(
+	server: http.Server,
+	preferredPort: number,
+): Promise<number> {
 	return new Promise((resolve, reject) => {
 		const tryListen = (port: number, allowFallback: boolean) => {
 			const onError = (error: NodeJS.ErrnoException) => {
@@ -412,11 +491,21 @@ function listenWithFallback(server: http.Server, preferredPort: number): Promise
 	});
 }
 
-const ALLOWED_CALLBACK_ORIGINS = new Set(["https://accounts.x.ai", "https://auth.x.ai"]);
+const ALLOWED_CALLBACK_ORIGINS = new Set([
+	"https://accounts.x.ai",
+	"https://auth.x.ai",
+]);
 
-function handleRequest(req: IncomingMessage, res: ServerResponse, onCallback: (url: URL) => void): void {
+function handleRequest(
+	req: IncomingMessage,
+	res: ServerResponse,
+	onCallback: (url: URL) => void,
+): void {
 	const origin = req.headers.origin;
-	const allowOrigin = typeof origin === "string" && ALLOWED_CALLBACK_ORIGINS.has(origin) ? origin : "";
+	const allowOrigin =
+		typeof origin === "string" && ALLOWED_CALLBACK_ORIGINS.has(origin)
+			? origin
+			: "";
 	if (allowOrigin) {
 		res.setHeader("Access-Control-Allow-Origin", allowOrigin);
 		res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -447,7 +536,10 @@ function handleRequest(req: IncomingMessage, res: ServerResponse, onCallback: (u
 	);
 }
 
-type StoredAuthFile = Record<string, ({ type?: string } & Partial<OAuthCredentials>) | undefined>;
+type StoredAuthFile = Record<
+	string,
+	({ type?: string } & Partial<OAuthCredentials>) | undefined
+>;
 
 type XaiModelPayload = {
 	data?: Array<Record<string, unknown>>;
@@ -467,11 +559,18 @@ function writeStoredAuth(auth: StoredAuthFile): void {
 	writeFileSync(authJsonPath(), `${JSON.stringify(auth, null, 2)}\n`, "utf8");
 }
 
-async function getStoredOAuthCredentials(): Promise<OAuthCredentials | undefined> {
+async function getStoredOAuthCredentials(): Promise<
+	OAuthCredentials | undefined
+> {
 	const auth = readStoredAuth();
 	for (const provider of ["supergrok", "xai"] as const) {
 		const credentials = auth[provider];
-		if (credentials?.type !== "oauth" || !credentials.access || !credentials.refresh || !credentials.expires) {
+		if (
+			credentials?.type !== "oauth" ||
+			!credentials.access ||
+			!credentials.refresh ||
+			!credentials.expires
+		) {
 			continue;
 		}
 
@@ -505,7 +604,9 @@ async function fetchSuperGrokModels(): Promise<ProviderModelConfig[]> {
 	});
 
 	if (!response.ok) {
-		throw new Error(`Failed to fetch xAI models: HTTP ${response.status} ${await response.text()}`);
+		throw new Error(
+			`Failed to fetch xAI models: HTTP ${response.status} ${await response.text()}`,
+		);
 	}
 
 	const payload = (await response.json()) as XaiModelPayload;
@@ -514,28 +615,47 @@ async function fetchSuperGrokModels(): Promise<ProviderModelConfig[]> {
 		.filter((model): model is ProviderModelConfig => model !== undefined);
 }
 
-function toProviderModelConfig(raw: Record<string, unknown>): ProviderModelConfig | undefined {
+function toProviderModelConfig(
+	raw: Record<string, unknown>,
+): ProviderModelConfig | undefined {
 	const id = String(raw.id ?? "").trim();
 	if (!id) return undefined;
 	// The provider uses Chat Completions; skip non-chat generation models returned by /v1/models.
 	// Also skip multi-agent, which is not usable as a normal single chat-completions model in pi.
 	if (/image|video|imagine|multi-agent/i.test(id)) return undefined;
 
-	const contextWindow = numberFrom(raw, [
-		"context_window",
-		"contextWindow",
-		"max_context_window",
-		"maxContextWindow",
-		"context_length",
-		"contextLength",
-	]) ?? 131_072;
-	const maxTokens = numberFrom(raw, ["max_output_tokens", "maxOutputTokens", "max_tokens", "maxTokens"]) ?? 8192;
-	const supportsImages = booleanFrom(raw, ["supports_images", "supportsImages", "vision", "image"])
-		?? arrayIncludes(raw.input, "image")
-		?? arrayIncludes(raw.capabilities, "image")
-		?? true;
-	const reasoning = booleanFrom(raw, ["reasoning", "supports_reasoning", "supportsReasoning"])
-		?? !/non[-_ ]?reasoning|code[-_ ]?fast|^grok-3(?:-|$)/i.test(id);
+	const contextWindow =
+		numberFrom(raw, [
+			"context_window",
+			"contextWindow",
+			"max_context_window",
+			"maxContextWindow",
+			"context_length",
+			"contextLength",
+		]) ?? 131_072;
+	const maxTokens =
+		numberFrom(raw, [
+			"max_output_tokens",
+			"maxOutputTokens",
+			"max_tokens",
+			"maxTokens",
+		]) ?? 8192;
+	const supportsImages =
+		booleanFrom(raw, [
+			"supports_images",
+			"supportsImages",
+			"vision",
+			"image",
+		]) ??
+		arrayIncludes(raw.input, "image") ??
+		arrayIncludes(raw.capabilities, "image") ??
+		true;
+	const reasoning =
+		booleanFrom(raw, [
+			"reasoning",
+			"supports_reasoning",
+			"supportsReasoning",
+		]) ?? !/non[-_ ]?reasoning|code[-_ ]?fast|^grok-3(?:-|$)/i.test(id);
 
 	return {
 		id,
@@ -548,16 +668,28 @@ function toProviderModelConfig(raw: Record<string, unknown>): ProviderModelConfi
 	};
 }
 
-function numberFrom(raw: Record<string, unknown>, keys: string[]): number | undefined {
+function numberFrom(
+	raw: Record<string, unknown>,
+	keys: string[],
+): number | undefined {
 	for (const key of keys) {
 		const value = raw[key];
-		if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
-		if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+		if (typeof value === "number" && Number.isFinite(value) && value > 0)
+			return value;
+		if (
+			typeof value === "string" &&
+			value.trim() &&
+			Number.isFinite(Number(value))
+		)
+			return Number(value);
 	}
 	return undefined;
 }
 
-function booleanFrom(raw: Record<string, unknown>, keys: string[]): boolean | undefined {
+function booleanFrom(
+	raw: Record<string, unknown>,
+	keys: string[],
+): boolean | undefined {
 	for (const key of keys) {
 		const value = raw[key];
 		if (typeof value === "boolean") return value;
@@ -571,25 +703,50 @@ function arrayIncludes(value: unknown, item: string): boolean | undefined {
 }
 
 function costFrom(raw: Record<string, unknown>): ProviderModelConfig["cost"] {
-	const pricing = typeof raw.pricing === "object" && raw.pricing ? (raw.pricing as Record<string, unknown>) : raw;
+	const pricing =
+		typeof raw.pricing === "object" && raw.pricing
+			? (raw.pricing as Record<string, unknown>)
+			: raw;
 	return {
 		input:
-			numberFrom(pricing, ["input", "prompt", "input_cost_per_million", "prompt_cost_per_million"]) ??
+			numberFrom(pricing, [
+				"input",
+				"prompt",
+				"input_cost_per_million",
+				"prompt_cost_per_million",
+			]) ??
 			xaiPriceFrom(pricing, "prompt_text_token_price") ??
 			0,
 		output:
-			numberFrom(pricing, ["output", "completion", "output_cost_per_million", "completion_cost_per_million"]) ??
+			numberFrom(pricing, [
+				"output",
+				"completion",
+				"output_cost_per_million",
+				"completion_cost_per_million",
+			]) ??
 			xaiPriceFrom(pricing, "completion_text_token_price") ??
 			0,
 		cacheRead:
-			numberFrom(pricing, ["cacheRead", "cache_read", "cache_read_cost_per_million"]) ??
+			numberFrom(pricing, [
+				"cacheRead",
+				"cache_read",
+				"cache_read_cost_per_million",
+			]) ??
 			xaiPriceFrom(pricing, "cached_prompt_text_token_price") ??
 			0,
-		cacheWrite: numberFrom(pricing, ["cacheWrite", "cache_write", "cache_write_cost_per_million"]) ?? 0,
+		cacheWrite:
+			numberFrom(pricing, [
+				"cacheWrite",
+				"cache_write",
+				"cache_write_cost_per_million",
+			]) ?? 0,
 	};
 }
 
-function xaiPriceFrom(raw: Record<string, unknown>, key: string): number | undefined {
+function xaiPriceFrom(
+	raw: Record<string, unknown>,
+	key: string,
+): number | undefined {
 	const value = numberFrom(raw, [key]);
 	return value === undefined ? undefined : value / 10_000;
 }
@@ -612,14 +769,20 @@ function streamSuperGrokWithOAuth(
 	(async () => {
 		try {
 			if (!options?.apiKey) {
-				throw new Error("No SuperGrok OAuth token found. Run /login supergrok, then retry.");
+				throw new Error(
+					"No SuperGrok OAuth token found. Run /login supergrok, then retry.",
+				);
 			}
 
-			const inner = streamSimpleOpenAICompletions(model as Model<"openai-completions">, context, {
-				...options,
-				apiKey: options.apiKey,
-				headers: { ...options.headers, "x-grok-source": "pi-supergrok" },
-			});
+			const inner = streamSimpleOpenAICompletions(
+				model as Model<"openai-completions">,
+				context,
+				{
+					...options,
+					apiKey: options.apiKey,
+					headers: { ...options.headers, "x-grok-source": "pi-supergrok" },
+				},
+			);
 
 			for await (const event of inner) stream.push(event);
 			stream.end();
@@ -639,7 +802,13 @@ function streamSuperGrokWithOAuth(
 						cacheRead: 0,
 						cacheWrite: 0,
 						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						cost: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							total: 0,
+						},
 					},
 					stopReason: options?.signal?.aborted ? "aborted" : "error",
 					errorMessage: error instanceof Error ? error.message : String(error),
@@ -678,7 +847,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerProvider("supergrok", {
 		name: "SuperGrok (xAI OAuth)",
 		baseUrl: XAI_API_BASE_URL,
-		api: "supergrok-openai-completions",
+		api: "openai-completions",
 		headers: { "x-grok-source": "pi-supergrok" },
 		oauth,
 		streamSimple: streamSuperGrokWithOAuth,
