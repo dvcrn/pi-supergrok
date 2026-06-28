@@ -842,29 +842,41 @@ function streamSuperGrokWithOAuth(
 	return stream;
 }
 
-const oauth = {
-	name: "SuperGrok / xAI OAuth",
-	login: loginXai,
-	usesCallbackServer: true,
-	refreshToken: refreshXaiTokens,
-	getApiKey: (credentials: OAuthCredentials) => credentials.access,
-};
-
-export default async function (pi: ExtensionAPI) {
-	const liveModels = await fetchSuperGrokModels();
-
-	// Always include static/special models (e.g. composer variants that may not
-	// appear in the public /v1/models response) and append any additional
-	// models returned by the authenticated upstream endpoint.
-	// Live models with the same id as a static one are ignored (static wins).
+function mergeModels(liveModels: ProviderModelConfig[]): ProviderModelConfig[] {
 	const models: ProviderModelConfig[] = [...STATIC_SUPERGROK_MODELS];
 	for (const m of liveModels) {
 		if (!models.some((existing) => existing.id === m.id)) {
 			models.push(m);
 		}
 	}
+	return models;
+}
 
-	// Expose SuperGrok separately from pi's built-in xAI API-key provider.
+function registerSupergrokProvider(
+	pi: ExtensionAPI,
+	models: ProviderModelConfig[],
+) {
+	const oauth = {
+		name: "SuperGrok / xAI OAuth",
+		usesCallbackServer: true,
+		login: async (
+			callbacks: OAuthLoginCallbacks,
+		): Promise<OAuthCredentials> => {
+			const credentials = await loginXai(callbacks);
+			fetchSuperGrokModels()
+				.then((live) => {
+					const updated = mergeModels(live);
+					if (updated.length > models.length) {
+						registerSupergrokProvider(pi, updated);
+					}
+				})
+				.catch(() => undefined);
+			return credentials;
+		},
+		refreshToken: refreshXaiTokens,
+		getApiKey: (credentials: OAuthCredentials) => credentials.access,
+	};
+
 	pi.registerProvider("supergrok", {
 		name: "SuperGrok (xAI OAuth)",
 		baseUrl: XAI_API_BASE_URL,
@@ -874,4 +886,9 @@ export default async function (pi: ExtensionAPI) {
 		streamSimple: streamSuperGrokWithOAuth,
 		models,
 	});
+}
+
+export default async function (pi: ExtensionAPI) {
+	const liveModels = await fetchSuperGrokModels();
+	registerSupergrokProvider(pi, mergeModels(liveModels));
 }
