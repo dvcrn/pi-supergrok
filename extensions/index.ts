@@ -389,16 +389,36 @@ async function loginXai(
 		nonce,
 	});
 
-	callbacks.onAuth({ url: authorizationUrl });
+	callbacks.onAuth({
+		url: authorizationUrl,
+		instructions:
+			"If the browser shows a code instead of redirecting, paste the code when prompted.",
+	});
 
 	try {
-		const callbackUrl = await listener.waitForCallback(CALLBACK_TIMEOUT_MS);
-		const params = parseOAuthCallbackInput(callbackUrl.toString(), state);
-		if ("error" in params) throw new Error(params.error);
+		const candidates: Promise<string>[] = [
+			listener.waitForCallback(CALLBACK_TIMEOUT_MS).then((callbackUrl) => {
+				const params = parseOAuthCallbackInput(callbackUrl.toString(), state);
+				if ("error" in params) throw new Error(params.error);
+				return params.code;
+			}),
+		];
+
+		if (callbacks.onManualCodeInput) {
+			candidates.push(
+				callbacks.onManualCodeInput().then((raw) => {
+					const trimmed = raw.trim();
+					if (!trimmed) throw new Error("Empty authorization code.");
+					return trimmed;
+				}),
+			);
+		}
+
+		const code = await Promise.any(candidates);
 
 		const tokenPayload = await exchangeXaiCodeForTokens({
 			tokenEndpoint: discovery.tokenEndpoint,
-			code: params.code,
+			code,
 			redirectUri: listener.redirectUri,
 			codeVerifier: pkce.verifier,
 			codeChallenge: pkce.challenge,
@@ -825,6 +845,7 @@ function streamSuperGrokWithOAuth(
 const oauth = {
 	name: "SuperGrok / xAI OAuth",
 	login: loginXai,
+	usesCallbackServer: true,
 	refreshToken: refreshXaiTokens,
 	getApiKey: (credentials: OAuthCredentials) => credentials.access,
 };
