@@ -4,11 +4,13 @@ Pi extension that adds SuperGrok/xAI OAuth for Grok models.
 
 Supported models:
 
-• grok-4.20-0309-non-reasoning
-• grok-4.20-0309-reasoning
-• grok-4.3
-• grok-build-0.1
-• grok-composer-2.5-fast
+- grok-4.5
+- grok-4.3
+- grok-build-0.1
+- grok-composer-2.5-fast
+- grok-4.20-0309-non-reasoning
+- grok-4.20-0309-reasoning
+
 
 Requires pi `0.74.0` or newer.
 
