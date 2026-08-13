@@ -4,6 +4,7 @@ Pi extension that adds SuperGrok/xAI OAuth for Grok models.
 
 Supported models:
 
+- grok-4.6
 - grok-4.5
 - grok-4.3
 - grok-build-0.1
