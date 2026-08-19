@@ -74,12 +74,65 @@ type ProviderModelConfig = {
 /**
  * Models that should always be available for the supergrok provider,
  * even if they are not (yet) returned by the live /v1/models endpoint
- * or when the user has not yet run /login.
+ * or when the user has not yet run /login or runs out of usage credits.
  *
- * These are merged with dynamically fetched models (live ones are appended
- * if they don't conflict on id).
+ * These are merged with dynamically fetched models.
  */
 const STATIC_SUPERGROK_MODELS: ProviderModelConfig[] = [
+	{
+		id: "grok-4.5",
+		name: "Grok 4.5 (SuperGrok)",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 2_000_000,
+		maxTokens: 30_000,
+	},
+	{
+		id: "grok-4.3",
+		name: "Grok 4.3 (SuperGrok)",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 30_000,
+	},
+	{
+		id: "grok-4.20-0309-reasoning",
+		name: "Grok 4.20 Reasoning (SuperGrok)",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 2_000_000,
+		maxTokens: 30_000,
+	},
+	{
+		id: "grok-4.20-0309-non-reasoning",
+		name: "Grok 4.20 Non-Reasoning (SuperGrok)",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 2_000_000,
+		maxTokens: 30_000,
+	},
+	{
+		id: "grok-build-0.1",
+		name: "Grok Build 0.1 (SuperGrok)",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 256_000,
+		maxTokens: 256_000,
+	},
+	{
+		id: "grok-code-fast-1",
+		name: "Grok Code Fast 1 (SuperGrok)",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32_768,
+		maxTokens: 8192,
+	},
 	{
 		id: "grok-composer-2.5-fast",
 		name: "Grok Composer 2.5 Fast (SuperGrok)",
@@ -570,69 +623,96 @@ function authJsonPath(): string {
 }
 
 function readStoredAuth(): StoredAuthFile {
-	const path = authJsonPath();
-	if (!existsSync(path)) return {};
-	return JSON.parse(readFileSync(path, "utf8")) as StoredAuthFile;
+	try {
+		const path = authJsonPath();
+		if (!existsSync(path)) return {};
+		return JSON.parse(readFileSync(path, "utf8")) as StoredAuthFile;
+	} catch {
+		return {};
+	}
 }
 
 function writeStoredAuth(auth: StoredAuthFile): void {
-	writeFileSync(authJsonPath(), `${JSON.stringify(auth, null, 2)}\n`, "utf8");
+	try {
+		writeFileSync(authJsonPath(), `${JSON.stringify(auth, null, 2)}\n`, "utf8");
+	} catch {
+		// Ignore storage write errors
+	}
 }
 
 async function getStoredOAuthCredentials(): Promise<
 	OAuthCredentials | undefined
 > {
-	const auth = readStoredAuth();
-	for (const provider of ["supergrok", "xai"] as const) {
-		const credentials = auth[provider];
-		if (
-			credentials?.type !== "oauth" ||
-			!credentials.access ||
-			!credentials.refresh ||
-			!credentials.expires
-		) {
-			continue;
+	try {
+		const auth = readStoredAuth();
+		for (const provider of ["supergrok", "xai"] as const) {
+			const credentials = auth[provider];
+			if (
+				credentials?.type !== "oauth" ||
+				!credentials.access ||
+				!credentials.refresh ||
+				!credentials.expires
+			) {
+				continue;
+			}
+
+			const current: OAuthCredentials = {
+				access: credentials.access,
+				refresh: credentials.refresh,
+				expires: credentials.expires,
+			};
+
+			if (Date.now() < current.expires) return current;
+
+			try {
+				const refreshed = await refreshXaiTokens(current);
+				auth[provider] = { type: "oauth", ...refreshed };
+				writeStoredAuth(auth);
+				return refreshed;
+			} catch {
+				return current;
+			}
 		}
-
-		const current: OAuthCredentials = {
-			access: credentials.access,
-			refresh: credentials.refresh,
-			expires: credentials.expires,
-		};
-
-		if (Date.now() < current.expires) return current;
-
-		const refreshed = await refreshXaiTokens(current);
-		auth[provider] = { type: "oauth", ...refreshed };
-		writeStoredAuth(auth);
-		return refreshed;
+	} catch {
+		return undefined;
 	}
 
 	return undefined;
 }
 
 async function fetchSuperGrokModels(): Promise<ProviderModelConfig[]> {
-	const credentials = await getStoredOAuthCredentials().catch(() => undefined);
-	if (!credentials?.access) return [];
-
-	const response = await fetch(`${XAI_API_BASE_URL}/models`, {
-		headers: {
-			Accept: "application/json",
-			Authorization: `Bearer ${credentials.access}`,
-			"x-grok-source": "pi-supergrok",
-		},
-	});
-
-	if (!response.ok) {
-		throw new Error(
-			`Failed to fetch xAI models: HTTP ${response.status} ${await response.text()}`,
+	try {
+		const credentials = await getStoredOAuthCredentials().catch(
+			() => undefined,
 		);
-	}
+		if (!credentials?.access) return [];
 
-	const payload = (await response.json()) as XaiModelPayload;
-	return (payload.data ?? [])
-		.map(toProviderModelConfig)
-		.filter((model): model is ProviderModelConfig => model !== undefined);
+		const response = await fetch(`${XAI_API_BASE_URL}/models`, {
+			headers: {
+				Accept: "application/json",
+				Authorization: `Bearer ${credentials.access}`,
+				"x-grok-source": "pi-supergrok",
+			},
+		});
+
+		if (!response.ok) {
+			const errorText = await response.text().catch(() => "");
+			console.warn(
+				`[pi-supergrok] Failed to fetch live models (HTTP ${response.status}): ${errorText}`,
+			);
+			return [];
+		}
+
+		const payload = (await response.json()) as XaiModelPayload;
+		return (payload.data ?? [])
+			.map(toProviderModelConfig)
+			.filter((model): model is ProviderModelConfig => model !== undefined);
+	} catch (error) {
+		console.warn(
+			`[pi-supergrok] Error fetching live models: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return [];
+	}
 }
 
 function toProviderModelConfig(
@@ -843,13 +923,14 @@ function streamSuperGrokWithOAuth(
 }
 
 function mergeModels(liveModels: ProviderModelConfig[]): ProviderModelConfig[] {
-	const models: ProviderModelConfig[] = [...STATIC_SUPERGROK_MODELS];
-	for (const m of liveModels) {
-		if (!models.some((existing) => existing.id === m.id)) {
-			models.push(m);
-		}
+	const map = new Map<string, ProviderModelConfig>();
+	for (const m of STATIC_SUPERGROK_MODELS) {
+		map.set(m.id, m);
 	}
-	return models;
+	for (const m of liveModels) {
+		map.set(m.id, m);
+	}
+	return Array.from(map.values());
 }
 
 function registerSupergrokProvider(
@@ -866,7 +947,7 @@ function registerSupergrokProvider(
 			fetchSuperGrokModels()
 				.then((live) => {
 					const updated = mergeModels(live);
-					if (updated.length > models.length) {
+					if (updated.length > 0) {
 						registerSupergrokProvider(pi, updated);
 					}
 				})
@@ -889,6 +970,11 @@ function registerSupergrokProvider(
 }
 
 export default async function (pi: ExtensionAPI) {
-	const liveModels = await fetchSuperGrokModels();
+	let liveModels: ProviderModelConfig[] = [];
+	try {
+		liveModels = await fetchSuperGrokModels();
+	} catch {
+		// Ignore model fetch errors on startup to avoid failing extension load
+	}
 	registerSupergrokProvider(pi, mergeModels(liveModels));
 }
